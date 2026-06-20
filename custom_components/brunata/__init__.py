@@ -20,6 +20,7 @@ try:
 except ImportError:
     _CONNECT_ERRORS = (ConnectionError, UnboundLocalError)
 
+import brunata_api as _brunata_api
 from brunata_api import Client
 from brunata_api.const import OAUTH2_URL, CLIENT_ID
 
@@ -107,6 +108,15 @@ async def _keycloak_get_tokens(self) -> bool:
     re-authentication.
     """
     session = self._session
+
+    # Reuse a still-valid token. The library calls _get_tokens() several times
+    # per update cycle (directly, then via _init_mappers/get_meters); without
+    # this we would perform a full browser login on every call.
+    try:
+        if self._is_token_valid("access_token") and session.headers.get("Authorization"):
+            return True
+    except Exception:  # noqa: BLE001 — be defensive about library internals
+        pass
 
     # Drop any stale Authorization header before logging in again.
     session.headers.pop("Authorization", None)
@@ -202,6 +212,17 @@ async def _keycloak_get_tokens(self) -> bool:
 
 
 Client._get_tokens = _keycloak_get_tokens
+
+
+# --- Data API moved to v2 ----------------------------------------------------
+# Alongside the Keycloak migration, Brunata retired the v1 data API: with a
+# valid token, /online-webservice/v1/rest/consumer/meters returns 401
+# "Not authorized" while the v2 endpoint returns the meter data. The brunata_api
+# library still points API_URL at v1, so we redirect it (and our own calls
+# below) to v2. The library resolves API_URL as a module global at call time,
+# so patching it here fixes get_meters()/update_meters()/_init_mappers() too.
+API_URL_V2 = "https://online.brunata.com/online-webservice/v2/rest"
+_brunata_api.API_URL = API_URL_V2
 # -----------------------------------------------------------------------------
 
 PLATFORMS: list[str] = ["sensor"]
@@ -288,14 +309,16 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
                     _LOGGER.error("Error in brunata-api library: 'object dict can't be used in await expression'. Ensure you have a fixed version of the library or contact the developer.")
                 raise UpdateFailed(f"Error communicating with Brunata API via library: {err}") from err
 
-            from brunata_api.const import API_URL, METERS_URL
+            # Note: API_URL_V2 (not the library's stale v1 const) — the v1
+            # data API now returns 401 for authenticated requests.
+            from brunata_api.const import METERS_URL
             from brunata_api import Meter
 
             # Fetch all meters with their latest status
-            _LOGGER.debug("Fetching meters from %s/consumer/meters", API_URL)
+            _LOGGER.debug("Fetching meters from %s/consumer/meters", API_URL_V2)
             response = await self.client.api_wrapper(
                 method="GET",
-                url=f"{API_URL}/consumer/meters",
+                url=f"{API_URL_V2}/consumer/meters",
                 headers={
                     "Referer": METERS_URL,
                 },
