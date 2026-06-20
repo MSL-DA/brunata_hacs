@@ -9,8 +9,9 @@ from brunata_api import Client
 
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.data_entry_flow import FlowResult
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.core import callback
 
 from .const import DOMAIN, CONF_EMAIL, CONF_PASSWORD, CONF_DEBUG_LOGGING
@@ -35,7 +36,14 @@ async def validate_input(hass: HomeAssistant, data: dict[str, str]) -> dict[str,
             if "await" in str(err) and "dict" in str(err):
                  _LOGGER.error("Error in brunata-api library: 'object dict can't be used in await expression'")
             raise InvalidAuth from err
-        
+
+        if isinstance(meters, dict) and (
+            meters.get("errorCode") is not None
+            or meters.get("errorMessage") is not None
+        ):
+            _LOGGER.error("Brunata API returned error response during login validation: %s", meters)
+            raise InvalidAuth
+
         if meters:
             _LOGGER.debug("Login validated, found %s meters", len(meters))
         else:
@@ -76,6 +84,35 @@ class BrunataConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_EMAIL): str,
+                    vol.Required(CONF_PASSWORD): str,
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_reauth(self, user_input=None) -> FlowResult:
+        """Handle re-authentication when credentials are no longer valid."""
+        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        assert entry is not None
+        errors = {}
+
+        if user_input is not None:
+            try:
+                info = await validate_input(self.hass, user_input)
+                self.hass.config_entries.async_update_entry(entry, data=user_input)
+                _LOGGER.debug("Re-authentication successful for %s", user_input[CONF_EMAIL])
+                return self.async_abort(reason="reauth_successful")
+            except InvalidAuth:
+                errors["base"] = "invalid_auth"
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.exception("Unexpected error during re-authentication")
+                errors["base"] = "unknown"
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_EMAIL, default=entry.data.get(CONF_EMAIL)): str,
                     vol.Required(CONF_PASSWORD): str,
                 }
             ),

@@ -9,6 +9,7 @@ from brunata_api.const import OAUTH2_URL, CLIENT_ID
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DOMAIN, CONF_EMAIL, CONF_PASSWORD, CONF_DEBUG_LOGGING
@@ -60,7 +61,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Initial data refresh
     _LOGGER.debug("Performing initial data refresh")
-    await coordinator.async_config_entry_first_refresh()
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except UpdateFailed as err:
+        if "authentication failed" in str(err).lower():
+            raise ConfigEntryAuthFailed from err
+        raise
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = coordinator
@@ -144,6 +150,28 @@ class BrunataDataUpdateCoordinator(DataUpdateCoordinator):
                 return dict(self.client._meters)
 
             if not isinstance(result, list):
+                if isinstance(result, dict) and (
+                    result.get("errorCode") is not None
+                    or result.get("errorMessage") is not None
+                ):
+                    error_code = result.get("errorCode") or result.get("error_code")
+                    error_message = result.get("errorMessage") or result.get("error_message")
+                    _LOGGER.error(
+                        "Brunata API returned error response: %s %s",
+                        error_code,
+                        error_message,
+                    )
+                    if error_code == "WB_WEBSERVICES_0011" or (
+                        isinstance(error_message, str)
+                        and "Not authorized" in error_message
+                    ):
+                        raise ConfigEntryAuthFailed(
+                            "Brunata API authentication failed. Check credentials and account access."
+                        )
+                    raise UpdateFailed(
+                        f"Brunata API returned error {error_code}: {error_message}"
+                    )
+
                 _LOGGER.error("Unexpected API response format: expected list, got %s. Response: %s", type(result), response.text)
                 return dict(self.client._meters)
 
