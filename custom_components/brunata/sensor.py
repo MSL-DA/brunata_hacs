@@ -52,6 +52,11 @@ class BrunataSensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
         self._meter_id = meter._meter_id
         self._attr_unique_id = f"brunata_{self._meter_id}_consumption"
+        # Cache the last known good reading so the sensor keeps its value (and
+        # stays available) between the infrequent API updates instead of going
+        # unavailable, which would break statistics rows.
+        self._last_value = None
+        self._last_reading_date = None
         self._attr_has_entity_name = True
         self._attr_translation_key = "consumption"
         self._attr_suggested_object_id = f"brunata_{self._meter_id}_consumption"
@@ -81,10 +86,9 @@ class BrunataSensor(CoordinatorEntity, SensorEntity):
         else:
             self._attr_icon = "mdi:gauge"
 
-        # TOTAL (not TOTAL_INCREASING) prevents HA from treating a temporarily
-        # lower API value as a meter reset, which would produce a large false spike
-        # in statistics on the first update after setup.
-        self._attr_state_class = SensorStateClass.TOTAL
+        # A meter reading only ever increases and never resets, so TOTAL_INCREASING
+        # lets HA correctly compute hourly sums and aggregate consumption over time.
+        self._attr_state_class = SensorStateClass.TOTAL_INCREASING
         self._attr_suggested_display_precision = 2
 
         # Group under a device per meter
@@ -98,18 +102,36 @@ class BrunataSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self):
-        """Return the state of the sensor."""
+        """Return the state of the sensor.
+
+        The API only refreshes once a day (or less). When there is no fresh
+        reading we keep returning the last known value instead of None, so the
+        sensor never goes unknown/unavailable and statistics stay intact.
+        """
         meter = self.coordinator.data.get(self._meter_id)
         if meter and meter.latest_reading:
-            return meter.latest_reading.value
-        return None
+            value = meter.latest_reading.value
+            # A real meter never counts down. If the API returns a value lower
+            # than what we've already seen, treat it as a glitch and keep the
+            # last value, so HA doesn't read it as a reset and emit a false spike.
+            if self._last_value is None or value >= self._last_value:
+                self._last_value = value
+                self._last_reading_date = meter.latest_reading.date
+        return self._last_value
+
+    @property
+    def available(self) -> bool:
+        """Stay available as long as we have ever seen a valid reading."""
+        if self._last_value is not None:
+            return True
+        meter = self.coordinator.data.get(self._meter_id)
+        return bool(meter and meter.latest_reading)
 
     @property
     def extra_state_attributes(self):
         """Return the state attributes."""
-        meter = self.coordinator.data.get(self._meter_id)
-        if meter and meter.latest_reading:
+        if self._last_reading_date is not None:
             return {
-                "reading_date": meter.latest_reading.date,
+                "reading_date": self._last_reading_date,
             }
         return {}
