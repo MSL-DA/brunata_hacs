@@ -91,6 +91,12 @@ class BrunataSensor(CoordinatorEntity, SensorEntity):
         self._attr_state_class = SensorStateClass.TOTAL_INCREASING
         self._attr_suggested_display_precision = 2
 
+        # Radiator/heat-allocator meters (no unit -> "pts") reset annually at
+        # year-end per Brunata's own behaviour, unlike water/energy meters
+        # which never decrease. Track this so native_value() can tell a real
+        # reset apart from a transient API glitch.
+        self._periodically_resets = not unit
+
         # Group under a device per meter
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"brunata_{self._meter_id}")},
@@ -111,10 +117,17 @@ class BrunataSensor(CoordinatorEntity, SensorEntity):
         meter = self.coordinator.data.get(self._meter_id)
         if meter and meter.latest_reading:
             value = meter.latest_reading.value
-            # A real meter never counts down. If the API returns a value lower
-            # than what we've already seen, treat it as a glitch and keep the
-            # last value, so HA doesn't read it as a reset and emit a false spike.
-            if self._last_value is None or value >= self._last_value:
+            # A water/energy meter never counts down, so a lower value there
+            # is treated as a glitch and ignored, keeping the last value so
+            # HA doesn't read it as a reset and emit a false spike.
+            # Radiator/heat-allocator meters (self._periodically_resets)
+            # genuinely reset at year-end, so a lower value for those is
+            # accepted as the new, correct state.
+            if (
+                self._last_value is None
+                or value >= self._last_value
+                or self._periodically_resets
+            ):
                 self._last_value = value
                 self._last_reading_date = meter.latest_reading.date
         return self._last_value
