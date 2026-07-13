@@ -67,7 +67,12 @@ class BrunataSensor(CoordinatorEntity, SensorEntity):
         if unit == "m3":
             self._attr_native_unit_of_measurement = "m³"
         elif not unit:
-            # For meters without unit (e.g. radiator meters) we use 'pts' (points)
+            # Fallback for meters that report no unit at all. Confirmed via
+            # meter_type == "Radiator" that heat-cost-allocator meters do NOT
+            # hit this branch — their API response includes unit == "units",
+            # which is handled by the else branch below. This branch is kept
+            # as a safety net in case some other, currently unknown meter
+            # type reports an empty unit string.
             self._attr_native_unit_of_measurement = "pts"
         else:
             self._attr_native_unit_of_measurement = raw_unit
@@ -91,11 +96,11 @@ class BrunataSensor(CoordinatorEntity, SensorEntity):
         self._attr_state_class = SensorStateClass.TOTAL_INCREASING
         self._attr_suggested_display_precision = 2
 
-        # Radiator/heat-allocator meters (no unit -> "pts") reset annually at
-        # year-end per Brunata's own behaviour, unlike water/energy meters
-        # which never decrease. Track this so native_value() can tell a real
-        # reset apart from a transient API glitch.
-        self._periodically_resets = not unit
+        # Radiator/heat-cost-allocator meters reset annually at year-end per
+        # Brunata's own behaviour (confirmed via meter_type == "Radiator"),
+        # unlike water/energy meters which never decrease. Track this so
+        # native_value() can tell a real reset apart from a transient glitch.
+        self._periodically_resets = "radiator" in meter_type
 
         # Group under a device per meter
         self._attr_device_info = DeviceInfo(
@@ -120,7 +125,7 @@ class BrunataSensor(CoordinatorEntity, SensorEntity):
             # A water/energy meter never counts down, so a lower value there
             # is treated as a glitch and ignored, keeping the last value so
             # HA doesn't read it as a reset and emit a false spike.
-            # Radiator/heat-allocator meters (self._periodically_resets)
+            # Radiator/heat-cost-allocator meters (self._periodically_resets)
             # genuinely reset at year-end, so a lower value for those is
             # accepted as the new, correct state.
             if (
